@@ -796,7 +796,7 @@ send_mdns_query(mdns_query_t* query, size_t count) {
 			printf("Failed to send mDNS query: %s\n", strerror(errno));
 	}
 
-	// This is a simple implementation that loops for 5 seconds or as long as we get replies
+	// This is a simple implementation that loops for 10 seconds or as long as we get replies
 	int res;
 	printf("Reading mDNS query replies\n");
 	int records = 0;
