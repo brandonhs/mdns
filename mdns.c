@@ -720,11 +720,10 @@ open_service_sockets(int* sockets, int max_sockets) {
 static int
 send_dns_sd(void) {
 	int sockets[32];
-	int *indices = malloc(sizeof(sockets));
+	int indices[sizeof(sockets)];
 	int num_sockets = open_client_sockets(sockets, indices, sizeof(sockets) / sizeof(sockets[0]), 0);
 	if (num_sockets <= 0) {
 		printf("Failed to open any client sockets\n");
-		free(indices);
 		return -1;
 	}
 	printf("Opened %d socket%s for DNS-SD\n", num_sockets, num_sockets > 1 ? "s" : "");
@@ -762,14 +761,13 @@ send_dns_sd(void) {
 			for (int isock = 0; isock < num_sockets; ++isock) {
 				if (FD_ISSET(sockets[isock], &readfs)) {
 					records += mdns_discovery_recv(sockets[isock], buffer, capacity, query_callback,
-					                               (void*)(&indices[isock]));
+					                               &indices[isock]);
 				}
 			}
 		}
 	} while (res > 0);
 
 	free(buffer);
-	free(indices);
 
 	for (int isock = 0; isock < num_sockets; ++isock)
 		mdns_socket_close(sockets[isock]);
