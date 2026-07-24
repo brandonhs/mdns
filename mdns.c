@@ -121,11 +121,14 @@ query_callback(int sock, const struct sockaddr* from, size_t addrlen, mdns_entry
 	(void)sizeof(sock);
 	(void)sizeof(query_id);
 	(void)sizeof(name_length);
-	(void)sizeof(user_data);
+
+	// TODO: Add support for linux with typedef
+	int *socket_index = (int*)user_data;  // dumb cast
+
 	mdns_string_t fromaddrstr = ip_address_to_string(addrbuffer, sizeof(addrbuffer), from, addrlen);
 	const char* entrytype = (entry == MDNS_ENTRYTYPE_ANSWER) ?
-                                "answer" :
-                                ((entry == MDNS_ENTRYTYPE_AUTHORITY) ? "authority" : "additional");
+	                            "answer" :
+	                            ((entry == MDNS_ENTRYTYPE_AUTHORITY) ? "authority" : "additional");
 	mdns_string_t entrystr =
 	    mdns_string_extract(data, size, &name_offset, entrybuffer, sizeof(entrybuffer));
 	if (rtype == MDNS_RECORDTYPE_PTR) {
@@ -152,8 +155,20 @@ query_callback(int sock, const struct sockaddr* from, size_t addrlen, mdns_entry
 		mdns_record_parse_aaaa(data, size, record_offset, record_length, &addr);
 		mdns_string_t addrstr =
 		    ipv6_address_to_string(namebuffer, sizeof(namebuffer), &addr, sizeof(addr));
-		printf("%.*s : %s %.*s AAAA %.*s\n", MDNS_STRING_FORMAT(fromaddrstr), entrytype,
+
+		const uint8_t* b = addr.sin6_addr.s6_addr;
+		// Link-Local prefix FE80::/10 (1111 1110 10)
+		int link_local = 1;
+
+		printf("%.*s : %s %.*s AAAA %.*s", MDNS_STRING_FORMAT(fromaddrstr), entrytype,
 		       MDNS_STRING_FORMAT(entrystr), MDNS_STRING_FORMAT(addrstr));
+		if (link_local) {
+			// Converts the link local IP into a valid usable IP, including the interface number
+			// TODO: Needs string support for linux
+			printf("%%%d (link-local)", *socket_index);
+		}
+
+		printf("\n");
 	} else if (rtype == MDNS_RECORDTYPE_TXT) {
 		size_t parsed = mdns_record_parse_txt(data, size, record_offset, record_length, txtbuffer,
 		                                      sizeof(txtbuffer) / sizeof(mdns_record_txt_t));
@@ -451,7 +466,7 @@ dump_callback(int sock, const struct sockaddr* from, size_t addrlen, mdns_entry_
 
 // Open sockets for sending one-shot multicast queries from an ephemeral port
 static int
-open_client_sockets(int* sockets, int max_sockets, int port) {
+open_client_sockets(int* sockets, int* adapter_indices, int max_sockets, int port) {
 	// When sending, each socket can only send to one network interface
 	// Thus we need to open one socket for each interface and address family
 	int num_sockets = 0;
@@ -508,7 +523,8 @@ open_client_sockets(int* sockets, int max_sockets, int port) {
 						saddr->sin_port = htons((unsigned short)port);
 						int sock = mdns_socket_open_ipv4(saddr);
 						if (sock >= 0) {
-							sockets[num_sockets++] = sock;
+    						sockets[num_sockets] = sock;
+    						adapter_indices[num_sockets++] = adapter->IfIndex;
 							log_addr = 1;
 						} else {
 							log_addr = 0;
@@ -544,7 +560,8 @@ open_client_sockets(int* sockets, int max_sockets, int port) {
 						saddr->sin6_port = htons((unsigned short)port);
 						int sock = mdns_socket_open_ipv6(saddr);
 						if (sock >= 0) {
-							sockets[num_sockets++] = sock;
+							sockets[num_sockets] = sock;
+							adapter_indices[num_sockets++] = adapter->IfIndex;
 							log_addr = 1;
 						} else {
 							log_addr = 0;
@@ -662,7 +679,7 @@ open_service_sockets(int* sockets, int max_sockets) {
 
 	// Call the client socket function to enumerate and get local addresses,
 	// but not open the actual sockets
-	open_client_sockets(0, 0, 0);
+	open_client_sockets(0, 0, 0, 0);
 
 	if (num_sockets < max_sockets) {
 		struct sockaddr_in sock_addr;
@@ -703,9 +720,11 @@ open_service_sockets(int* sockets, int max_sockets) {
 static int
 send_dns_sd(void) {
 	int sockets[32];
-	int num_sockets = open_client_sockets(sockets, sizeof(sockets) / sizeof(sockets[0]), 0);
+	int *indices = malloc(sizeof(sockets));
+	int num_sockets = open_client_sockets(sockets, indices, sizeof(sockets) / sizeof(sockets[0]), 0);
 	if (num_sockets <= 0) {
 		printf("Failed to open any client sockets\n");
+		free(indices);
 		return -1;
 	}
 	printf("Opened %d socket%s for DNS-SD\n", num_sockets, num_sockets > 1 ? "s" : "");
@@ -718,7 +737,6 @@ send_dns_sd(void) {
 
 	size_t capacity = 2048;
 	void* buffer = malloc(capacity);
-	void* user_data = 0;
 	size_t records;
 
 	// This is a simple implementation that loops for 5 seconds or as long as we get replies
@@ -744,13 +762,14 @@ send_dns_sd(void) {
 			for (int isock = 0; isock < num_sockets; ++isock) {
 				if (FD_ISSET(sockets[isock], &readfs)) {
 					records += mdns_discovery_recv(sockets[isock], buffer, capacity, query_callback,
-					                               user_data);
+					                               (void*)(&indices[isock]));
 				}
 			}
 		}
 	} while (res > 0);
 
 	free(buffer);
+	free(indices);
 
 	for (int isock = 0; isock < num_sockets; ++isock)
 		mdns_socket_close(sockets[isock]);
@@ -763,8 +782,9 @@ send_dns_sd(void) {
 static int
 send_mdns_query(mdns_query_t* query, size_t count) {
 	int sockets[32];
+	int indices[sizeof(sockets)];
 	int query_id[32];
-	int num_sockets = open_client_sockets(sockets, sizeof(sockets) / sizeof(sockets[0]), 0);
+	int num_sockets = open_client_sockets(sockets, indices, sizeof(sockets) / sizeof(sockets[0]), 0);
 	if (num_sockets <= 0) {
 		printf("Failed to open any client sockets\n");
 		return -1;
@@ -773,7 +793,6 @@ send_mdns_query(mdns_query_t* query, size_t count) {
 
 	size_t capacity = 2048;
 	void* buffer = malloc(capacity);
-	void* user_data = 0;
 
 	printf("Sending mDNS query");
 	for (size_t iq = 0; iq < count; ++iq) {
@@ -819,7 +838,7 @@ send_mdns_query(mdns_query_t* query, size_t count) {
 			for (int isock = 0; isock < num_sockets; ++isock) {
 				if (FD_ISSET(sockets[isock], &readfs)) {
 					size_t rec = mdns_query_recv(sockets[isock], buffer, capacity, query_callback,
-					                             user_data, query_id[isock]);
+					                             (void*)(&indices[isock]), query_id[isock]);
 					if (rec > 0)
 						records += rec;
 				}
