@@ -339,7 +339,7 @@ static inline size_t
 mdns_string_find(const char* str, size_t length, char c, size_t offset);
 
 //! Compare if two strings are equal. If the strings are equal it returns >0 and the offset variables are
-//! updated to the end of the corresponding strings. If the strings are not equal it returns 0 and 
+//! updated to the end of the corresponding strings. If the strings are not equal it returns 0 and
 //! the offset variables are NOT updated.
 static inline int
 mdns_string_equal(const void* buffer_lhs, size_t size_lhs, size_t* ofs_lhs, const void* buffer_rhs,
